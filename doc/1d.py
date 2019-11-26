@@ -29,7 +29,6 @@ mpl.rcParams['legend.frameon'] = False
 
 xpix = np.linspace(0., 1., 200) # default pixel gridding 
 sig_psf = 0.02 # psf width
-sig_nois = 0.1 # noise level 
 
 def psi(theta): 
     ''' measurement model, which in our case is just a 1d gaussian of width 
@@ -50,14 +49,14 @@ def Psi(ws, thetas):
     return np.sum(np.array([w * psi(tt) for (w,tt) in zip(ws, thetas)]),0)
 
 
-def obs1d(N_source=5, seed=1):  
+def obs1d(N_source=5, sig_noise=0.2, seed=1):  
     ''' generate and write out 1d observations on a xpix. Takes positions 
     and "intensities" (weights) and convolves them with a PSF and adds noise 
     '''
     np.random.seed(seed)
     thetas = np.random.rand(N_source) # x_true positions 
-    weights = np.random.rand(N_source)+1 # weights --- in SMLM intensities 
-    return  Psi(weights, thetas) + sig_nois * np.random.randn(len(xpix)) 
+    weights = np.random.rand(N_source)*2 # weights --- in SMLM intensities 
+    return  thetas, weights, Psi(weights, thetas) + sig_noise * np.random.randn(len(xpix)) 
     
 
 def ell(ws, thetas, yobs): 
@@ -66,41 +65,33 @@ def ell(ws, thetas, yobs):
     return ((Psi(ws, thetas) - yobs)**2).sum() 
 
 
-def ell_noise(ws, thetas, yobs): 
+def ell_noise(ws, thetas, yobs, sig_noise=0.2): 
     ''' loss function  = likelihood 
     '''
-    return ((Psi(ws, thetas) - yobs)**2/sig_nois**2).sum() 
+    return ((Psi(ws, thetas) - yobs)**2/sig_noise**2).sum() 
 
 
 def ell_sparseprior(ws, thetas, yobs, **kwargs): 
     ''' loss function with a sparse prior 
     '''
-    f_density = kwargs['f_density']
-    lnlike = ((Psi(ws, thetas) - yobs)**2/sig_nois**2).sum() 
+    fdensity = kwargs['fdensity']
+    def lnlike(ws):     
+        return -0.5 * np.sum((Psi(ws, theta_grid) - yobs)**2/kwargs['sig_noise']**2) 
 
-    def p1(_I): # the intensity function is uniform between 1 and 2 
-        _I = np.atleast_1d(_I)
-        _p1 = np.zeros_like(_I) 
-        _p1[(_I >= 1.) & (_I <= 2.)] = 1.
-        return _p1
+    def prior_i(wi): 
+        ''' log of Poisson prior for an indivudial pixel
+        '''
+        pri = 0.
+        if 0. < wi <= 2.: 
+            pri += fdensity # p1 term 
+        if wi > 0: 
+            pri += (1.-fdensity) * gaussian(np.log(wi), loc=-4., scale=0.75)/wi
+        return pri
 
-    #def p2(_I): 
-    #    _p2 = lambda ii: p1(_I - ii) * p1(ii) 
-    #    return sp.integrate.quad(_p2, -np.inf, np.inf)[0]
+    def lnprior(ws): 
+        return np.sum([np.log(prior_i(w)) for w in ws])
 
-    def lnPrior(ws): 
-        wlim = (ws > 0.)
-        _p1 = np.array([p1(w) for w in ws[wlim]])
-        #p2tt = np.array([p2(ttt) for ttt in tt])
-        # ignore second order term for now 
-        pri = np.sum(np.log((1.-f_density) * np.clip(Norm.pdf(np.log(ws[wlim]), loc=-10, scale=1), 1e-5, None)/ws[wlim] + f_density * _p1)) 
-        if np.isfinite(pri): 
-            return -pri
-        else: 
-            raise ValueError
-    lnprior = lnPrior(ws) 
-    print 'like', lnlike
-    return lnlike + lnprior
+    return -1.*(lnlike(ws) + lnprior(ws)) 
 
 
 def lmo(v): 
@@ -167,120 +158,96 @@ def select_k(history):
     return history[k_hat]
 
 
-def ADCG_1d(loss_str='l2', N_source=3, seed=1, **lossfn_kwargs): 
+def ADCG_1d(loss_str='l2', N_source=3, sig_noise=0.2, seed=1): 
     '''
     '''
-    np.random.seed(seed)
-    thetas_true = np.random.rand(N_source) # x_true positions 
-    weights_true = np.random.rand(N_source)+1 # weights --- in SMLM intensities 
-    yobs =  Psi(weights_true, thetas_true) + sig_nois * np.random.randn(len(xpix)) 
+    thetas_true, weights_true, yobs = obs1d(N_source=N_source, sig_noise=sig_noise, seed=seed)
+    fdensity = float(N_source) / float(len(theta_grid)) # for now lets assume we know the density perfectly. 
 
     if loss_str is 'l2': 
-        hist = adcg(yobs, ell, coordinate_descent, 10)
+        hist = adcg(yobs, ell, coordinate_descent, 30)
     elif loss_str == 'l2_noise':
         hist = adcg(yobs, ell_noise, coordinate_descent, 30)
     elif loss_str == 'l2_noise_sparse': 
-        hist = adcg(yobs, ell_sparseprior, coordinate_descent, 30, **lossfn_kwargs)
+        hist = adcg(yobs, ell_sparseprior, coordinate_descent, 30, fdensity=fdensity, sig_noise=sig_noise)
     loss, ws, thetas = select_k(hist)
     output = Psi(ws, thetas) 
+    print ws 
 
     # plot data 
     fig = plt.figure(figsize=(10,5))
     sub = fig.add_subplot(111)
-    sub.scatter(xpix, yobs, marker='x', s=10) 
-    for i in range(len(thetas_true)):
-        sub.plot(xpix, weights_true[i] * psi(thetas_true[i]), c='k', ls=':', lw=0.5)
+    sub.errorbar(xpix, yobs, yerr=sig_noise, elinewidth=0.2, fmt='xC0', zorder=1)
+    for x, w in zip(thetas_true, weights_true):
+        sub.vlines(x, 0, w, color='k', linewidth=1.5, linestyle='--')
 
-    sub.plot(xpix, output, c='k') 
-    for i in range(len(thetas)): 
-        sub.plot([thetas[i], thetas[i]], [0., 2.5], c='k', ls='--') 
-        #sub.plot(xpix, ws[i] * psi(thetas[i]), c='k', ls=':', lw=0.5)
+    if len(ws) > 0:
+        for x, w in zip(thetas, ws):
+            _plt = sub.vlines(x, 0, w, color='C1')
+        sub.legend([_plt], ['inf. intensities'], loc='upper right', fontsize=15) 
     sub.set_xlabel(r'$x_{\rm pix}$', fontsize=25) 
-    sub.set_xlim(0., 1.) 
+    sub.set_xlim(-0.1, 1.1) 
     sub.set_ylabel('intensity', fontsize=25) 
     sub.set_ylim(0., 2.5) 
-    fobs = os.path.join(UT.dat_dir(), 'obs1d.psf%s.nois%s.Nsource%i.seed%i.npy' % 
-            (str(sig_psf), str(sig_nois), N_source, seed))
-    fig.savefig(os.path.join(UT.fig_dir(), os.path.basename(fobs).replace('.npy', '.%s.adcg.png' % loss_str)), 
+    ffig = os.path.join(UT.fig_dir(), 
+            'obs1d.psf%s.nois%s.Nsource%i.seed%i.%s.adcg.png' % (str(sig_psf), str(sig_noise), N_source, seed, loss_str))
+    fig.savefig(ffig, 
             bbox_inches='tight')
     return None 
 
 
-def _Norm(x, loc=None, scale=None): 
+def gaussian(x, loc=None, scale=None): 
     ''' N(x; loc, scale) 
     '''
     y = (x - loc)/scale
-    return np.exp(-y**2./2.)/np.sqrt(2.*np.pi)/scale
+    return np.exp(-0.5 * y**2)/np.sqrt(2.*np.pi)/scale
 
 
-def Post_sparseprior(ws, yobs, f_density=0., silent=True): 
-    ''' Spare Bayes posterior with a sparse prior 
-    '''
-    lnlike = ((Psi(ws, theta_grid) - yobs)**2/sig_nois**2).sum() 
-
-    def p1(_I): # the intensity function is uniform between 1 and 2 
-        _I = np.atleast_1d(_I)
-        _p1 = np.zeros_like(_I) 
-        _p1[(_I >= 0.) & (_I <= 2.)] = 0.5
-        return _p1
-
-    #def p2(_I): 
-    #    _p2 = lambda ii: p1(_I - ii) * p1(ii) 
-    #    return sp.integrate.quad(_p2, -np.inf, np.inf)[0]
-
-    def lnPrior(ws): 
-        wlim = (ws > 0.)
-        _p1 = p1(ws) 
-        #_p1 = np.array([p1(w) for w in ws[wlim]])
-        #p2tt = np.array([p2(ttt) for ttt in tt])
-        # ignore second order term for now 
-        #pri = np.sum(np.log((1.-f_density) * np.clip(_Norm(np.log(ws[wlim]), loc=-10, scale=1-3), 1e-5, None)/ws[wlim] + f_density * _p1)) 
-        pri0 = (1.-f_density) * np.clip(_Norm(np.log(ws), loc=np.log(1e-10), scale=1e-5), 0, None)/ws
-        pri1 = f_density * _p1
-        pri = np.sum(np.log(pri0 + pri1)) 
-        #print 'w', ws 
-        #print '0', pri0
-        if not silent: print 'p1', pri1
-        #print (pri0+pri1).min() 
-        if np.isfinite(pri): 
-            return -pri
-        else: 
-            raise ValueError
-    lnprior = lnPrior(ws) 
-    #print lnlike + lnprior
-    if not silent: print 'like', lnlike
-    #print 'prior', lnprior
-    return lnlike + lnprior
-
-
-def SpareBayes_1d(N_source=3, seed=1, f_density=0.015): 
+def SpareBayes_1d(N_source=3, sig_noise=0.2, seed=1, prior_loc=-3):
     '''
     '''
-    np.random.seed(seed)
-    thetas_true = np.random.rand(N_source) # x_true positions 
-    weights_true = 2.*np.random.rand(N_source) # weights --- in SMLM intensities 1 to 2
-    yobs =  Psi(weights_true, thetas_true) + sig_nois * np.random.randn(len(xpix)) 
+    thetas_true, weights_true, yobs = obs1d(N_source=N_source, sig_noise=sig_noise, seed=seed)
+    fdensity = float(N_source) / float(len(theta_grid)) # for now lets assume we know the density perfectly. 
 
     weights_true_grid = np.repeat(1e-10, len(theta_grid))
     for ww, tt in zip(weights_true, thetas_true):
         weights_true_grid[(np.abs(tt - theta_grid)).argmin()] = ww
-    
-    tt0 = np.repeat(1e-10, len(theta_grid)) #2.*np.ones(len(theta_grid))
-    res = scipy.optimize.minimize(
-            Agrad.value_and_grad(lambda tts: Post_sparseprior(tts, yobs, f_density=f_density, silent=False)), 
-            tt0, # theta initial 
-            jac=True, 
-            method='L-BFGS-B', 
-            bounds=[(1e-10, 1e1)]*len(tt0))
-    ws_inf = res['x']
-    post_inf = res['fun'] 
-    print ws_inf
-    print post_inf 
-    print 'true', Post_sparseprior(weights_true_grid, yobs, f_density=f_density, silent=False)
-    print 'zero', Post_sparseprior(np.repeat(1e-10, len(tt0)), yobs, f_density=f_density)
-    #print ell_sparseprior(weights_true, thetas_true, yobs, f_density=f_density)
-    #print ((Psi(weights_true, thetas_true) - yobs)**2/sig_nois**2).sum() 
-    #print ((Psi(weights_true_grid, theta_grid) - yobs)**2/sig_nois**2).sum() 
+
+    def prior_i(wi, prior_scale=0.2): 
+        ''' log of Poisson prior for an indivudial pixel
+        '''
+        pri = 0.
+        if 0. < wi <= 2.: 
+            pri += fdensity # p1 term 
+        if wi > 0: 
+            pri += (1.-fdensity) * gaussian(np.log(wi), loc=prior_loc, scale=prior_scale)/wi
+        return pri
+
+    def lnprior(ws, prior_scale=0.2): 
+        return np.sum([np.log(prior_i(w, prior_scale=prior_scale)) for w in ws])
+
+    def lnlike(ws):     
+        return -0.5 * np.sum((Psi(ws, theta_grid) - yobs)**2/sig_noise**2) 
+
+    def lnpost(ws, prior_scale=0.2): 
+        return lnlike(ws) + lnprior(ws, prior_scale=prior_scale)
+
+    tt0 = 2.*np.ones(len(theta_grid)) 
+    post_inf = np.inf 
+    for prior_scale in np.logspace(-3, 0, 10)[::-1]: 
+        res = scipy.optimize.minimize(
+                Agrad.value_and_grad(lambda tt: -1.*lnpost(tt, prior_scale=prior_scale)), 
+                tt0, # theta initial 
+                jac=True, 
+                method='L-BFGS-B', 
+                bounds=[(1e-5, 1e1)]*len(tt0))
+        print('sig=%f, loss=%f' % (prior_scale, res['fun']))
+        if res['fun'] > post_inf: break 
+        tt0 = res['x']
+        post_inf = res['fun'] 
+    ws_inf = tt0 
+    print 'true', lnpost(weights_true_grid)
+    print 'zero', lnpost(np.repeat(1e-5, len(tt0)))
 
     #loss, ws, thetas = select_k(hist)
     output = Psi(ws_inf, theta_grid) 
@@ -288,45 +255,25 @@ def SpareBayes_1d(N_source=3, seed=1, f_density=0.015):
     # plot data 
     fig = plt.figure(figsize=(10,5))
     sub = fig.add_subplot(111)
-    sub.scatter(xpix, yobs, marker='x', s=10) 
-    for i in range(len(thetas_true)):
-        sub.plot(xpix, weights_true[i] * psi(thetas_true[i]), c='k', ls=':', lw=0.5)
-    sub.plot(xpix, output, c='k') 
-    sub.plot(theta_grid, ws_inf)
-    #print output 
-    #print ws_inf 
+    #sub.scatter(xpix, yobs, marker='x', s=10) 
+    sub.errorbar(xpix, yobs, yerr=sig_noise, elinewidth=0.2, fmt='xC0', zorder=1)
+    for x, w in zip(thetas_true, weights_true):
+        sub.vlines(x, 0, w, color='k', linewidth=1.5, linestyle='--')
+    sub.plot(xpix, output, c='C1', lw=0.5, ls=':') 
+    sub.plot(theta_grid, ws_inf, c='C1', label='inf. intensities')
     sub.set_xlabel(r'$x_{\rm pix}$', fontsize=25) 
-    sub.set_xlim(0., 1.) 
+    sub.set_xlim(-0.1, 1.1) 
     sub.set_ylabel('intensity', fontsize=25) 
     sub.set_ylim(0., 2.5) 
-    fobs = os.path.join(UT.dat_dir(), 'obs1d.psf%s.nois%s.Nsource%i.seed%i.npy' % 
-            (str(sig_psf), str(sig_nois), N_source, seed))
-    fig.savefig(
-            os.path.join(UT.fig_dir(), 
-                'obs1d.psf%s.nois%s.Nsource%i.seed%i.sparsebayes.png' % (str(sig_psf), str(sig_nois), N_source, seed)),
-            bbox_inches='tight')
+    ffig = os.path.join(UT.fig_dir(), 
+            'obs1d.psf%s.nois%s.Nsource%i.seed%i.sparsebayes.png' % (str(sig_psf), str(sig_noise), N_source, seed))
+    fig.savefig(ffig, bbox_inches='tight')
     return None 
 
 
-def delta_test(): 
-    
-    x = np.logspace(-10, -2, 1000) 
-    fig = plt.figure()
-    sub = fig.add_subplot(111)
-    print _Norm(np.log(x), loc=np.log(1e-10), scale=1e-3)[::-1]
-    print (_Norm(np.log(x), loc=np.log(1e-10), scale=1e-3)/x)[::-1]
-    sub.plot(x, _Norm(np.log(x), loc=np.log(1e-10), scale=1e-3), c='k')
-    sub.plot(x, _Norm(np.log(x), loc=np.log(1e-10), scale=1e-3)/x, c='C1')
-    sub.set_xlim(1e-10, 1.e-2) 
-    sub.set_xscale('log')
-    sub.set_yscale('log') 
-    #sub.set_ylim(0., 10.) 
-    fig.savefig(os.path.join(UT.fig_dir(), 'delta_test.png'), bbox_inches='tight') 
-    return None
-
-
 if __name__=="__main__": 
-    #ADCG_1d(loss_str='l2')
     #ADCG_1d(loss_str='l2_noise')
-    #ADCG_1d(loss_str='l2_noise_sparse', f_density=3./200.)
-    SpareBayes_1d(f_density=0.015)
+    #ADCG_1d(loss_str='l2_noise_sparse', N_source=5, sig_noise=0.2, seed=1)
+    for seed in range(10): 
+        ADCG_1d(loss_str='l2', N_source=5, sig_noise=0.3, seed=seed)
+        SpareBayes_1d(N_source=5, sig_noise=0.3, prior_loc=-3, seed=seed)
