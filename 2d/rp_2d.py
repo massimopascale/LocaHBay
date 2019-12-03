@@ -39,14 +39,22 @@ point source locations in psf+noise and recover hyperparameters.
 
 
 #create global definitions - this will become a main function later on
-np.random.seed(1)
-Ndata = 2;
+np.random.seed(42)
+Ndata = 3;
 n_grid = 16;
 pix_1d = np.linspace(0., 1., n_grid) # pixel gridding
 fdensity_true = float(Ndata)/float(n_grid**2); #number density of obj in 1d
 
-sig_psf = 0.2 # psf width
-sig_noise = 0.2 # noise level
+sig_psf = 0.1 # psf width
+sig_noise = 0.02 # noise level
+
+#these are values for the power law function for sampling intensities
+w_interval = (1,2);
+w_lin = np.linspace(1,2,100);
+alpha = 2;
+w_norm = (w_interval[1]**(alpha+1) - w_interval[0]**(alpha+1))/(alpha+1);
+w_func = np.power(w_lin,alpha)/w_norm;
+w_true = w_norm*np.random.choice(w_func,Ndata);
 
 
 def psi(pos): 
@@ -63,14 +71,6 @@ def gaussian(x, loc=None, scale=None):
     y = (x - loc)/scale
     return np.exp(-0.5*y**2)/np.sqrt(2.*np.pi)/scale
 
-def trapezoidal(f, a, b, n):
-    h = float(b - a) / n
-    s = 0.0
-    s += f(a)/2.0
-    for i in range(1, n):
-        s += f(a + i*h)
-    s += f(b)/2.0
-    return s * h
     
 def Psi(ws): 
     ''' "forward operator" i.e. forward model 
@@ -88,9 +88,13 @@ def prior_i(w,fdensity,alpha,sig):
     pri=0.;
     if 0. < w <= 2:
         #norm = (max(interval_grid)**(alpha+1) - min(interval_grid)**(alpha+1))/(alpha+1); #normalization of mass function
-        p1 = 1#lambda x: x**alpha /norm #probability of single source
+        p1 = w**alpha /w_norm; #probability of single source
+        w_fft = np.linspace(0,w,50);
         #now probability of second source
-        p2 = 1#trapezoidal(lambda x:p1(w)*p1(x-w), min(interval_grid), max(interval_grid), 100);
+        p2 = np.abs(Agrad.numpy.fft.ifft(Agrad.numpy.fft.fft(w_fft**alpha /w_norm)**2));
+        p2 = p2[-1];
+        #p1 = 1;
+        #p2 = 1;
         pri += fdensity*p1 + p2*fdensity**2
     if w > 0:
         pri += (1.-fdensity - fdensity**2 ) *gaussian(np.log(w),loc=-4., scale=sig)/w
@@ -122,25 +126,13 @@ theta_grid = np.linspace(0., 1., n_grid) # gridding of theta (same as pixels)
 x_true = np.abs(np.random.rand(Ndata)) # location of sources
 y_true = np.abs(np.random.rand(Ndata));
 
-#sample intensities from normal distribution, alpha is your sigma:
-'''
-#these are old from 1d with power law - will find surrogate function soon
-w_interval = (1,5)
-w_grid = np.linspace(w_interval[0],w_interval[1],100)
-alpha = 2;
-w_norm = (w_interval[1]**(alpha+1) - w_interval[0]**(alpha+1))/(alpha+1);
-w_func = np.power(w_grid,alpha)/w_norm;
-w_true = w_norm*np.random.choice(w_func,Ndata);
-'''
-w_true = np.abs(np.random.rand(Ndata))+1;
+#w_true = np.abs(np.random.rand(Ndata))+1;
 
 #true grid needs to be set up with noise
 w_true_grid = np.zeros((n_grid,n_grid))
 for x,y, w in zip(x_true,y_true, w_true): 
     w_true_grid[np.argmin(np.abs(theta_grid - x)),np.argmin(np.abs(theta_grid - y))] = w
 data = Psi(w_true_grid) + sig_noise * np.random.randn(n_grid,n_grid);
-#plt.imshow(w_true_grid*4 + data);
-#plt.show();
 
 ########################################################################
 #now begin the actual execution
@@ -152,7 +144,7 @@ tt0 = np.zeros(n_grid**2) +1; #begin with high uniform M
 
 #begin with the simple method of just minimizing
 f_curr = fdensity_true;
-alpha_curr = 0;
+alpha_curr = 2;
 sig_delta = 0.75;
 #keeping in mind that minimize requires flattened arrays
 res = scipy.optimize.minimize(Agrad.value_and_grad(lambda tt: -1.*lnpost(tt,f_curr,alpha_curr,sig_delta)),
@@ -165,10 +157,14 @@ tt_prime = res['x'];
 w_final = tt_prime.reshape((n_grid,n_grid));
 plt.imshow(w_true_grid);
 plt.show();
+plt.imshow(data);
+plt.show();
+
 plt.imshow(w_final);
 plt.show();
 plt.imshow(w_true_grid-w_final);
 plt.show();
+
 '''
 f_curr = 0.3;
 alpha_curr = 0.2;
