@@ -6,7 +6,8 @@ import scipy.optimize
 import scipy.stats as st
 from scipy.integrate import trapz
 from scipy.integrate import simps
-from scipy.signal import find_peaks
+from photutils import find_peaks
+from photutils import detect_threshold
 # -- plotting --- 
 import matplotlib as mpl 
 import matplotlib.pyplot as plt
@@ -40,7 +41,7 @@ point source locations in psf+noise and recover hyperparameters.
 
 #create global definitions - this will become a main function later on
 np.random.seed(42)
-Ndata = 3;
+Ndata = 5;
 n_grid = 16;
 pix_1d = np.linspace(0., 1., n_grid) # pixel gridding
 fdensity_true = float(Ndata)/float(n_grid**2); #number density of obj in 1d
@@ -52,7 +53,7 @@ sig_noise = 0.02 # noise level
 w_interval = (1,2);
 w_lin = np.linspace(1,2,100);
 alpha = 2;
-w_norm = (w_interval[1]**(alpha+1) - w_interval[0]**(alpha+1))/(alpha+1);
+w_norm = (50**(alpha+1) - w_interval[0]**(alpha+1))/(alpha+1);
 w_func = np.power(w_lin,alpha)/w_norm;
 w_true = w_norm*np.random.choice(w_func,Ndata);
 
@@ -86,15 +87,13 @@ def prior_i(w,fdensity,alpha,sig):
     log of Poisson prior for an indivudial pixel
     '''
     pri=0.;
-    if 0. < w <= 2:
+    if 0. < w <= 4:
         #norm = (max(interval_grid)**(alpha+1) - min(interval_grid)**(alpha+1))/(alpha+1); #normalization of mass function
         p1 = w**alpha /w_norm; #probability of single source
         w_fft = np.linspace(0,w,50);
         #now probability of second source
         p2 = np.abs(Agrad.numpy.fft.ifft(Agrad.numpy.fft.fft(w_fft**alpha /w_norm)**2));
         p2 = p2[-1];
-        #p1 = 1;
-        #p2 = 1;
         pri += fdensity*p1 + p2*fdensity**2
     if w > 0:
         pri += (1.-fdensity - fdensity**2 ) *gaussian(np.log(w),loc=-4., scale=sig)/w
@@ -151,18 +150,26 @@ res = scipy.optimize.minimize(Agrad.value_and_grad(lambda tt: -1.*lnpost(tt,f_cu
                               tt0, # theta initial
                               jac=True, 
                               method='L-BFGS-B', 
-                              bounds=[(1e-5, 2)]*len(tt0))
+                              bounds=[(1e-5, 10)]*len(tt0))
                               
 tt_prime = res['x'];
 w_final = tt_prime.reshape((n_grid,n_grid));
-plt.imshow(w_true_grid);
-plt.show();
-plt.imshow(data);
-plt.show();
+#pick out the peaks using photutils
+thresh = detect_threshold(w_final,3);
+tbl = find_peaks(w_final,thresh);
+positions = np.transpose((tbl['x_peak'], tbl['y_peak']))
+w_peaks = np.zeros((n_grid,n_grid));
+w_peaks[positions] = w_final[positions];
 
-plt.imshow(w_final);
-plt.show();
-plt.imshow(w_true_grid-w_final);
+
+
+fig, ax = plt.subplots(1,3)
+ax[0].imshow(w_true_grid);
+ax[0].set_title('True Positions')
+ax[1].imshow(data);
+ax[1].set_title('Observed Data')
+ax[2].imshow(w_peaks);
+ax[2].set_title('Sparse Bayes')
 plt.show();
 
 '''
